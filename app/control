@@ -1,8 +1,8 @@
 Package: com.yourname.virtualcamdemo
 Name: VirtualCamDemo
-Version: 0.2.0
+Version: 0.3.0
 Architecture: iphoneos-arm64
-Description: Demo app - camera session with virtual video frames (single-clock pipeline).
+Description: In-app MP4 virtual preview for TrollStore. Cannot replace system camera without jailbreak.
 Maintainer: Your Name <you@example.com>
 Author: Your Name <you@example.com>
 Section: Utilities

@@ -6,8 +6,6 @@ on:
     branches: [main, master]
     paths-ignore:
       - "**.md"
-      - "NO_IPA_ON_WINDOWS.txt"
-      - "PUSH_AND_BUILD.md"
 
 permissions:
   contents: read
@@ -16,7 +14,7 @@ permissions:
 jobs:
   build-ipa:
     runs-on: macos-14
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -28,82 +26,61 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Inject IOSurface headers into SDK
-        run: |
-          set -euo pipefail
-          chmod +x scripts/inject_iosurface_headers.sh
-          sudo bash scripts/inject_iosurface_headers.sh
-          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          # Ensure module map is the split one
-          cat "$SDK/System/Library/Frameworks/IOSurface.framework/Modules/module.modulemap"
-          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurfaceObjC.h"
+      - name: Install ldid
+        run: brew install ldid || true
 
-      - name: Install Theos + ldid
+      - name: Install Theos
         run: |
           set -euo pipefail
           git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "PATH=$HOME/theos/bin:$PATH" >> "$GITHUB_ENV"
-          brew install ldid || true
 
-      - name: Build with Theos (arm64)
+      - name: Build application
         working-directory: app
         run: |
           set -euo pipefail
           export THEOS="${THEOS:-$HOME/theos}"
           export TARGET=iphone:clang:latest:14.0
           export ARCHS=arm64
-          # Disable modules for C file reliability: strip -fmodules from default if any
           make clean || true
-          # Compile step by step with explicit flags if make fails
           if ! make all FINALPACKAGE=1; then
-            echo "Theos make failed — retry compiling iosurface_buffer.c without modules"
+            echo "Theos failed, manual clang"
             OBJDIR=".theos/obj/arm64"
-            mkdir -p "$OBJDIR" "$OBJDIR/VirtualCamDemo.app"
+            mkdir -p "$OBJDIR/VirtualCamDemo.app"
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
             CLANG=$(xcrun --sdk iphoneos -f clang)
-            COMMON="-isysroot $SDK -arch arm64 -miphoneos-version-min=14.0 -I.. -fobjc-arc -Wall"
-            $CLANG -x c $COMMON -fno-objc-arc -fno-modules -c ../iosurface_buffer.c -o $OBJDIR/iosurface_buffer.c.o
+            COMMON="-isysroot $SDK -arch arm64 -miphoneos-version-min=14.0 -fobjc-arc -Wall"
             $CLANG $COMMON -c main.m -o $OBJDIR/main.m.o
             $CLANG $COMMON -c AppDelegate.m -o $OBJDIR/AppDelegate.m.o
             $CLANG $COMMON -c CameraViewController.m -o $OBJDIR/CameraViewController.m.o
-            $CLANG $COMMON -c ../video_to_iosurface.m -o $OBJDIR/video_to_iosurface.m.o
-            $CLANG $COMMON -framework UIKit -framework Foundation -framework AVFoundation \
-              -framework CoreMedia -framework CoreVideo -framework CoreImage -framework QuartzCore \
-              -framework IOSurface -framework PhotosUI -framework UniformTypeIdentifiers \
-              -framework MobileCoreServices \
+            $CLANG $COMMON \
+              -framework UIKit -framework Foundation -framework AVFoundation -framework AVKit \
+              -framework PhotosUI -framework UniformTypeIdentifiers -framework QuartzCore \
               -o $OBJDIR/VirtualCamDemo.app/VirtualCamDemo \
-              $OBJDIR/main.m.o $OBJDIR/AppDelegate.m.o $OBJDIR/CameraViewController.m.o \
-              $OBJDIR/video_to_iosurface.m.o $OBJDIR/iosurface_buffer.c.o
+              $OBJDIR/main.m.o $OBJDIR/AppDelegate.m.o $OBJDIR/CameraViewController.m.o
             cp Info.plist $OBJDIR/VirtualCamDemo.app/
-            # fake Theos layout
             mkdir -p .theos/obj
             rm -rf .theos/obj/VirtualCamDemo.app
             cp -R $OBJDIR/VirtualCamDemo.app .theos/obj/
           fi
-          find .. -type d -name 'VirtualCamDemo.app' | head -n 20
-          ls -laR .theos/obj 2>/dev/null | head -n 80
+          find .. -type d -name 'VirtualCamDemo.app' | head
 
-      - name: Codesign + package IPA
+      - name: Package IPA
         run: |
           set -euo pipefail
           APP="$(find . -type d -name 'VirtualCamDemo.app' | head -n 1)"
           test -n "$APP"
-          echo "APP=$APP"
-          # Ensure Info.plist
           if [ ! -f "$APP/Info.plist" ]; then cp app/Info.plist "$APP/"; fi
-          # entitlements sign
           if command -v ldid >/dev/null 2>&1; then
             ldid -Sapp/entitlements.plist "$APP/VirtualCamDemo" || ldid -S "$APP/VirtualCamDemo"
           fi
-          # file type check
-          file "$APP/VirtualCamDemo" || true
+          file "$APP/VirtualCamDemo"
           mkdir -p dist/Payload
           rm -rf dist/Payload/*
           cp -R "$APP" dist/Payload/
           (cd dist && zip -qr VirtualCamDemo.ipa Payload)
           ls -lah dist/VirtualCamDemo.ipa
-          # basic zip structure check
           unzip -l dist/VirtualCamDemo.ipa | head
 
       - name: Upload IPA artifact
@@ -112,25 +89,4 @@ jobs:
           name: VirtualCamDemo-ipa
           path: dist/VirtualCamDemo.ipa
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Build tweak deb (optional)
-        continue-on-error: true
-        working-directory: tweak
-        run: |
-          export THEOS="${THEOS:-$HOME/theos}"
-          export TARGET=iphone:clang:latest:14.0
-          export ARCHS=arm64
-          make package FINALPACKAGE=1 || true
-
-      - name: Upload deb artifact
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: MyFirstTweak-deb
-          path: |
-            packages/**/*.deb
-            tweak/packages/**/*.deb
-          if-no-files-found: ignore
           retention-days: 14

@@ -1,81 +1,58 @@
 /*
- * VirtualCamDemo v0.2
- * Pick an MP4 -> show it as virtual camera preview inside this app.
+ * VirtualCamDemo v0.3 — TrollStore / 未越狱
  *
- * NOT a system-wide camera replace without jailbreak.
+ * 能做：在本 App 内选择 MP4，全屏预览（当作「虚拟摄像头画面」自测）
+ * 不能做：替换系统「相机」App、微信、抖音等（无越狱 + 注入权限做不到）
+ *
+ * 巨魔(TrollStore) = 永久签名安装，不等于越狱，不能 hook 其它进程。
  */
 
 #import "CameraViewController.h"
 
 #import <AVFoundation/AVFoundation.h>
-#import <CoreImage/CoreImage.h>
-#import <IOSurface/IOSurfaceRef.h>
+#import <AVKit/AVKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-#import "video_to_iosurface.h"
-
 static NSString *const kVideoFileName = @"demo.mp4";
 static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
+static NSString *const kPrefsDidShowLimitKey = @"MFTDidShowLimitAlert";
 
-@interface CameraViewController () <
-	AVCaptureVideoDataOutputSampleBufferDelegate,
-	UIDocumentPickerDelegate,
-	PHPickerViewControllerDelegate
-> {
-	VTIContext *_vti;
-	IOSurfaceRef _surfaces[2];
-	int _frontIdx;
-	uint64_t _gen;
-	BOOL _virtualRunning;
-}
+@interface CameraViewController () <UIDocumentPickerDelegate, PHPickerViewControllerDelegate>
 @property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *warnLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIView *previewHost;
-@property (nonatomic, strong) CALayer *videoLayer;
+@property (nonatomic, strong) AVPlayer *player;
+@property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, strong) UIButton *pickButton;
 @property (nonatomic, strong) UIButton *startButton;
 @property (nonatomic, strong) UIButton *stopButton;
-@property (nonatomic, strong) UIButton *modeButton;
-@property (nonatomic, strong) dispatch_queue_t frameQueue;
-@property (nonatomic, strong) dispatch_source_t timer;
-@property (nonatomic, strong) AVCaptureSession *session;
-@property (nonatomic, strong) AVCaptureVideoDataOutput *dataOutput;
-@property (nonatomic, strong) dispatch_queue_t camQueue;
-@property (nonatomic, assign) BOOL useRealCameraClock;
+@property (nonatomic, strong) id loopObserver;
 @end
 
 @implementation CameraViewController
 
 - (void)viewDidLoad {
 	[super viewDidLoad];
-	self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.12 alpha:1.0];
-	_frontIdx = 0;
-	_gen = 0;
-	_surfaces[0] = NULL;
-	_surfaces[1] = NULL;
-	_vti = NULL;
-	_virtualRunning = NO;
-	self.useRealCameraClock = NO;
-	self.frameQueue = dispatch_queue_create("com.yourname.virtualcamdemo.frame", DISPATCH_QUEUE_SERIAL);
-	self.camQueue = dispatch_queue_create("com.yourname.virtualcamdemo.cam", DISPATCH_QUEUE_SERIAL);
+	self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.10 alpha:1.0];
 	[self buildUI];
 	[self refreshStatus];
+	[self showLimitAlertIfNeeded];
 }
 
 - (void)viewDidLayoutSubviews {
 	[super viewDidLayoutSubviews];
-	self.videoLayer.frame = self.previewHost.bounds;
+	self.playerLayer.frame = self.previewHost.bounds;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
 	[super viewWillDisappear:animated];
-	[self stopVirtualCamera];
+	[self stopPlayback];
 }
 
 - (void)dealloc {
-	[self stopVirtualCamera];
-	[self teardownPipeline];
+	[self stopPlayback];
 }
 
 #pragma mark - Paths
@@ -104,38 +81,43 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 
 - (void)buildUI {
 	self.titleLabel = [[UILabel alloc] init];
-	self.titleLabel.text = @"Virtual Camera";
+	self.titleLabel.text = @"虚拟摄像头 (本App)";
 	self.titleLabel.textColor = UIColor.whiteColor;
 	self.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
 	self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
 	[self.view addSubview:self.titleLabel];
 
+	self.warnLabel = [[UILabel alloc] init];
+	self.warnLabel.numberOfLines = 0;
+	self.warnLabel.textColor = [UIColor colorWithRed:1.0 green:0.75 blue:0.35 alpha:1.0];
+	self.warnLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+	self.warnLabel.text =
+		@"重要：手机未越狱时，无法替换系统「相机」或微信摄像头。\n"
+		@"巨魔只能安装App，不能注入其它软件。\n"
+		@"本App只能在「本页面」播放你选的MP4。";
+	self.warnLabel.translatesAutoresizingMaskIntoConstraints = NO;
+	[self.view addSubview:self.warnLabel];
+
 	self.statusLabel = [[UILabel alloc] init];
-	self.statusLabel.textColor = [UIColor colorWithWhite:0.85 alpha:1];
-	self.statusLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
 	self.statusLabel.numberOfLines = 0;
+	self.statusLabel.textColor = [UIColor colorWithWhite:0.88 alpha:1];
+	self.statusLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
 	self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
 	[self.view addSubview:self.statusLabel];
 
 	self.previewHost = [[UIView alloc] init];
-	self.previewHost.backgroundColor = [UIColor colorWithWhite:0.05 alpha:1];
+	self.previewHost.backgroundColor = UIColor.blackColor;
 	self.previewHost.layer.cornerRadius = 12;
 	self.previewHost.clipsToBounds = YES;
 	self.previewHost.translatesAutoresizingMaskIntoConstraints = NO;
 	[self.view addSubview:self.previewHost];
 
-	self.videoLayer = [CALayer layer];
-	self.videoLayer.contentsGravity = kCAGravityResizeAspect;
-	self.videoLayer.actions = @{ @"contents" : [NSNull null], @"bounds" : [NSNull null] };
-	[self.previewHost.layer addSublayer:self.videoLayer];
-
-	self.pickButton = [self makeButton:@"1) Choose MP4" color:[UIColor systemBlueColor] action:@selector(onPickVideo)];
-	self.startButton = [self makeButton:@"2) Start Virtual Cam" color:[UIColor systemGreenColor] action:@selector(onStart)];
-	self.stopButton = [self makeButton:@"Stop" color:[UIColor systemRedColor] action:@selector(onStop)];
-	self.modeButton = [self makeButton:@"Mode: Video-only (recommended)" color:[UIColor systemGrayColor] action:@selector(onToggleMode)];
+	self.pickButton = [self makeButton:@"1. 选择 / 上传 MP4" color:[UIColor systemBlueColor] action:@selector(onPick)];
+	self.startButton = [self makeButton:@"2. 在本App播放虚拟画面" color:[UIColor systemGreenColor] action:@selector(onStart)];
+	self.stopButton = [self makeButton:@"停止播放" color:[UIColor systemRedColor] action:@selector(onStop)];
 
 	UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-		self.pickButton, self.startButton, self.stopButton, self.modeButton
+		self.pickButton, self.startButton, self.stopButton
 	]];
 	stack.axis = UILayoutConstraintAxisVertical;
 	stack.spacing = 10;
@@ -144,22 +126,29 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 
 	UILayoutGuide *g = self.view.safeAreaLayoutGuide;
 	[NSLayoutConstraint activateConstraints:@[
-		[self.titleLabel.topAnchor constraintEqualToAnchor:g.topAnchor constant:12],
+		[self.titleLabel.topAnchor constraintEqualToAnchor:g.topAnchor constant:10],
 		[self.titleLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-		[self.statusLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:8],
+		[self.titleLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+
+		[self.warnLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:8],
+		[self.warnLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+		[self.warnLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+
+		[self.statusLabel.topAnchor constraintEqualToAnchor:self.warnLabel.bottomAnchor constant:8],
 		[self.statusLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
 		[self.statusLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-		[self.previewHost.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:12],
+
+		[self.previewHost.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:10],
 		[self.previewHost.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
 		[self.previewHost.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-		[self.previewHost.heightAnchor constraintEqualToAnchor:self.view.heightAnchor multiplier:0.42],
-		[stack.topAnchor constraintEqualToAnchor:self.previewHost.bottomAnchor constant:16],
+		[self.previewHost.heightAnchor constraintEqualToAnchor:self.view.heightAnchor multiplier:0.40],
+
+		[stack.topAnchor constraintEqualToAnchor:self.previewHost.bottomAnchor constant:14],
 		[stack.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
 		[stack.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-		[self.pickButton.heightAnchor constraintEqualToConstant:48],
-		[self.startButton.heightAnchor constraintEqualToConstant:48],
+		[self.pickButton.heightAnchor constraintEqualToConstant:50],
+		[self.startButton.heightAnchor constraintEqualToConstant:50],
 		[self.stopButton.heightAnchor constraintEqualToConstant:44],
-		[self.modeButton.heightAnchor constraintEqualToConstant:40],
 	]];
 }
 
@@ -182,35 +171,54 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 
 - (void)refreshStatus {
 	NSString *path = [self storedVideoPath];
-	NSString *mode = self.useRealCameraClock ? @"Real camera clock + replace frames" : @"Video-only (no camera permission needed)";
 	if (path) {
 		unsigned long long sz = [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil] fileSize];
 		[self setStatus:[NSString stringWithFormat:
-			@"Video ready:\n%@\nSize: %.1f MB\nMode: %@\n\n"
-			@"This app will show the MP4 as camera preview.\n"
-			@"Other apps (WeChat etc.) need jailbreak + tweak.",
-			path, sz / 1024.0 / 1024.0, mode]];
+			@"已保存视频:\n%@\n大小: %.2f MB\n\n点「2. 在本App播放虚拟画面」开始。",
+			path.lastPathComponent, sz / 1024.0 / 1024.0]];
 	} else {
-		[self setStatus:[NSString stringWithFormat:
-			@"No video yet.\nTap \"1) Choose MP4\" to import from Files or Photos.\n\nMode: %@\n\n"
-			@"Without jailbreak, virtual camera works ONLY inside this app.",
-			mode]];
+		[self setStatus:@"还没有视频。\n请点「1. 选择 / 上传 MP4」。"];
 	}
+}
+
+- (void)showLimitAlertIfNeeded {
+	NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+	if ([ud boolForKey:kPrefsDidShowLimitKey]) {
+		return;
+	}
+	[ud setBool:YES forKey:kPrefsDidShowLimitKey];
+	[ud synchronize];
+
+	UIAlertController *alert =
+		[UIAlertController alertControllerWithTitle:@"无法替换系统相机"
+						    message:
+							    @"你的 iPhone 只有巨魔、没有越狱。\n\n"
+							    @"• 巨魔：只能安装 App\n"
+							    @"• 越狱：才能 hook 系统相机/微信\n\n"
+							    @"因此打开系统「相机」看到的一定还是真实画面，"
+							    @"这不是软件坏了，是 iOS 安全限制。\n\n"
+							    @"本 App 只能在自己的预览框里播放你上传的 MP4。"
+						 preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self presentViewController:alert animated:YES completion:nil];
+	});
 }
 
 #pragma mark - Actions
 
-- (void)onPickVideo {
-	UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Choose MP4 source"
-								       message:nil
-								preferredStyle:UIAlertControllerStyleActionSheet];
-	[sheet addAction:[UIAlertAction actionWithTitle:@"Files / Browse" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-		[self pickFromDocuments];
+- (void)onPick {
+	UIAlertController *sheet =
+		[UIAlertController alertControllerWithTitle:@"选择 MP4"
+						    message:nil
+					     preferredStyle:UIAlertControllerStyleActionSheet];
+	[sheet addAction:[UIAlertAction actionWithTitle:@"文件 / 浏览" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+		[self pickFromFiles];
 	}]];
-	[sheet addAction:[UIAlertAction actionWithTitle:@"Photo Library" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+	[sheet addAction:[UIAlertAction actionWithTitle:@"相册视频" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
 		[self pickFromPhotos];
 	}]];
-	[sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+	[sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 	if (sheet.popoverPresentationController) {
 		sheet.popoverPresentationController.sourceView = self.pickButton;
 		sheet.popoverPresentationController.sourceRect = self.pickButton.bounds;
@@ -218,7 +226,7 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 	[self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)pickFromDocuments {
+- (void)pickFromFiles {
 	NSArray<UTType *> *types = @[ UTTypeMovie, UTTypeMPEG4Movie, UTTypeQuickTimeMovie ];
 	UIDocumentPickerViewController *picker =
 		[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
@@ -239,84 +247,53 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 - (void)onStart {
 	NSString *path = [self storedVideoPath];
 	if (!path) {
-		[self setStatus:@"Please choose an MP4 first."];
-		[self onPickVideo];
+		[self setStatus:@"请先选择 MP4"];
+		[self onPick];
 		return;
 	}
-	[self startVirtualCameraWithPath:path];
+	[self startPlaybackWithPath:path];
 }
 
 - (void)onStop {
-	[self stopVirtualCamera];
+	[self stopPlayback];
 	[self refreshStatus];
-	NSString *cur = self.statusLabel.text ?: @"";
-	[self setStatus:[cur stringByAppendingString:@"\n\nVirtual camera stopped."]];
-}
-
-- (void)onToggleMode {
-	self.useRealCameraClock = !self.useRealCameraClock;
-	NSString *t = self.useRealCameraClock ? @"Mode: Real camera clock" : @"Mode: Video-only (recommended)";
-	[self.modeButton setTitle:t forState:UIControlStateNormal];
-	[self refreshStatus];
-	if (_virtualRunning) {
-		NSString *path = [self storedVideoPath];
-		[self stopVirtualCamera];
-		if (path) {
-			[self startVirtualCameraWithPath:path];
-		}
-	}
+	NSString *s = self.statusLabel.text ?: @"";
+	[self setStatus:[s stringByAppendingString:@"\n\n已停止。"]];
 }
 
 #pragma mark - Import
 
 - (void)importVideoFromURL:(NSURL *)url {
 	if (!url) {
-		[self setStatus:@"Invalid video URL"];
+		[self setStatus:@"无效文件"];
 		return;
 	}
-	[self setStatus:@"Importing video..."];
-
+	[self setStatus:@"正在导入…"];
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		NSFileManager *fm = [NSFileManager defaultManager];
 		NSString *dest = [self targetDemoPath];
 		NSError *err = nil;
-		BOOL access = [url startAccessingSecurityScopedResource];
+		BOOL scoped = [url startAccessingSecurityScopedResource];
 
 		NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:&err];
-		NSURL *tmpCopy = nil;
 		if (!data) {
-			NSFileCoordinator *coord = [[NSFileCoordinator alloc] init];
-			__block NSError *coordErr = nil;
-			__block NSURL *local = nil;
-			[coord coordinateReadingItemAtURL:url
-						 options:0
-						   error:&coordErr
-					      byAccessor:^(NSURL *newURL) {
-						      NSString *tmp = [NSTemporaryDirectory()
-							      stringByAppendingPathComponent:
-								      [NSString stringWithFormat:@"import_%@.mp4",
-												[[NSUUID UUID] UUIDString]]];
-						      [fm removeItemAtPath:tmp error:nil];
-						      if ([fm copyItemAtURL:newURL
-								      toURL:[NSURL fileURLWithPath:tmp]
-								      error:nil]) {
-							      local = [NSURL fileURLWithPath:tmp];
-						      }
-					      }];
-			if (local) {
-				tmpCopy = local;
-				data = [NSData dataWithContentsOfURL:local options:0 error:&err];
+			NSString *tmp = [NSTemporaryDirectory()
+				stringByAppendingPathComponent:
+					[NSString stringWithFormat:@"imp_%@.mp4", [[NSUUID UUID] UUIDString]]];
+			[fm removeItemAtPath:tmp error:nil];
+			if ([fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:tmp] error:&err]) {
+				data = [NSData dataWithContentsOfFile:tmp options:0 error:&err];
+				[fm removeItemAtPath:tmp error:nil];
 			}
 		}
-
-		if (access) {
+		if (scoped) {
 			[url stopAccessingSecurityScopedResource];
 		}
 
-		if (!data || data.length < 32) {
+		if (!data || data.length < 64) {
 			dispatch_async(dispatch_get_main_queue(), ^{
-				[self setStatus:[NSString stringWithFormat:@"Import failed: %@",
-								 err.localizedDescription ?: @"empty"]];
+				[self setStatus:[NSString stringWithFormat:@"导入失败: %@",
+								 err.localizedDescription ?: @"文件太小/无法读取"]];
 			});
 			return;
 		}
@@ -324,21 +301,18 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 		[fm createDirectoryAtPath:[self documentsDir] withIntermediateDirectories:YES attributes:nil error:nil];
 		[fm removeItemAtPath:dest error:nil];
 		BOOL ok = [data writeToFile:dest options:NSDataWritingAtomic error:&err];
-		if (tmpCopy) {
-			[fm removeItemAtURL:tmpCopy error:nil];
-		}
 
 		dispatch_async(dispatch_get_main_queue(), ^{
 			if (!ok) {
-				[self setStatus:[NSString stringWithFormat:@"Write failed: %@", err.localizedDescription]];
+				[self setStatus:[NSString stringWithFormat:@"保存失败: %@", err.localizedDescription]];
 				return;
 			}
 			[[NSUserDefaults standardUserDefaults] setObject:dest forKey:kPrefsVideoPathKey];
 			[[NSUserDefaults standardUserDefaults] synchronize];
 			[self refreshStatus];
 			[self setStatus:[NSString stringWithFormat:
-					 @"Import OK (%.1f MB)\n%@\n\nTap \"2) Start Virtual Cam\"",
-					 data.length / 1024.0 / 1024.0, dest]];
+					 @"导入成功 %.2f MB\n%@\n\n请点「2. 在本App播放虚拟画面」",
+					 data.length / 1024.0 / 1024.0, dest.lastPathComponent]];
 		});
 	});
 }
@@ -348,325 +322,99 @@ static NSString *const kPrefsVideoPathKey = @"MFTVideoPath";
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-	[self setStatus:@"File pick cancelled"];
+	[self setStatus:@"已取消"];
 }
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
 	[picker dismissViewControllerAnimated:YES completion:nil];
-	PHPickerResult *result = results.firstObject;
-	if (!result) {
-		[self setStatus:@"No photo video selected"];
+	PHPickerResult *r = results.firstObject;
+	if (!r) {
+		[self setStatus:@"未选择视频"];
 		return;
 	}
-	NSItemProvider *provider = result.itemProvider;
+	NSItemProvider *p = r.itemProvider;
 	NSString *type = UTTypeMovie.identifier;
-	if (![provider hasItemConformingToTypeIdentifier:type]) {
+	if (![p hasItemConformingToTypeIdentifier:type]) {
 		type = @"public.movie";
 	}
-	[self setStatus:@"Exporting from Photos..."];
-	[provider loadFileRepresentationForTypeIdentifier:type
-				     completionHandler:^(NSURL *url, NSError *error) {
-					     if (!url || error) {
-						     dispatch_async(dispatch_get_main_queue(), ^{
-							     [self setStatus:[NSString stringWithFormat:@"Photos export failed: %@",
-									      error.localizedDescription ?: @"?"]];
-						     });
-						     return;
-					     }
-					     NSString *tmp = [NSTemporaryDirectory()
-						     stringByAppendingPathComponent:
-							     [NSString stringWithFormat:@"photo_%@.mp4",
-											[[NSUUID UUID] UUIDString]]];
-					     NSError *copyErr = nil;
-					     [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
-					     BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:url
-											       toURL:[NSURL fileURLWithPath:tmp]
-											       error:&copyErr];
-					     dispatch_async(dispatch_get_main_queue(), ^{
-						     if (!ok) {
-							     [self setStatus:[NSString stringWithFormat:@"Copy failed: %@",
-									      copyErr.localizedDescription]];
-							     return;
-						     }
-						     [self importVideoFromURL:[NSURL fileURLWithPath:tmp]];
-					     });
-				     }];
+	[self setStatus:@"从相册导出…"];
+	[p loadFileRepresentationForTypeIdentifier:type
+				  completionHandler:^(NSURL *url, NSError *error) {
+					  if (!url || error) {
+						  dispatch_async(dispatch_get_main_queue(), ^{
+							  [self setStatus:[NSString stringWithFormat:@"相册失败: %@",
+									   error.localizedDescription ?: @"?"]];
+						  });
+						  return;
+					  }
+					  NSString *tmp = [NSTemporaryDirectory()
+						  stringByAppendingPathComponent:
+							  [NSString stringWithFormat:@"ph_%@.mp4",
+										     [[NSUUID UUID] UUIDString]]];
+					  NSError *ce = nil;
+					  [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+					  BOOL ok = [[NSFileManager defaultManager] copyItemAtURL:url
+											    toURL:[NSURL fileURLWithPath:tmp]
+											    error:&ce];
+					  dispatch_async(dispatch_get_main_queue(), ^{
+						  if (!ok) {
+							  [self setStatus:[NSString stringWithFormat:@"拷贝失败: %@",
+									   ce.localizedDescription]];
+							  return;
+						  }
+						  [self importVideoFromURL:[NSURL fileURLWithPath:tmp]];
+					  });
+				  }];
 }
 
-#pragma mark - Pipeline
+#pragma mark - Playback (in-app virtual preview)
 
-- (void)teardownPipeline {
-	if (_surfaces[0]) {
-		CFRelease(_surfaces[0]);
-		_surfaces[0] = NULL;
+- (void)stopPlayback {
+	if (self.loopObserver) {
+		[[NSNotificationCenter defaultCenter] removeObserver:self.loopObserver];
+		self.loopObserver = nil;
 	}
-	if (_surfaces[1]) {
-		CFRelease(_surfaces[1]);
-		_surfaces[1] = NULL;
-	}
-	if (_vti) {
-		vti_close(_vti);
-		_vti = NULL;
-	}
+	[self.player pause];
+	self.player = nil;
+	[self.playerLayer removeFromSuperlayer];
+	self.playerLayer = nil;
 }
 
-- (BOOL)openPipelineAtPath:(NSString *)path {
-	[self teardownPipeline];
-	VTIContext *vti = vti_open(path.fileSystemRepresentation, true);
-	if (!vti) {
-		return NO;
-	}
-	int w = vti_width(vti);
-	int h = vti_height(vti);
-	if (w <= 0 || h <= 0) {
-		vti_close(vti);
-		return NO;
-	}
-	IOSurfaceRef s0 = isb_create(w, h, false);
-	IOSurfaceRef s1 = isb_create(w, h, false);
-	if (!s0 || !s1) {
-		if (s0) {
-			CFRelease(s0);
-		}
-		if (s1) {
-			CFRelease(s1);
-		}
-		vti_close(vti);
-		return NO;
-	}
-	_vti = vti;
-	_surfaces[0] = s0;
-	_surfaces[1] = s1;
-	_frontIdx = 0;
-	_gen = 0;
-	return YES;
-}
+- (void)startPlaybackWithPath:(NSString *)path {
+	[self stopPlayback];
 
-- (BOOL)advanceFrame {
-	if (!_vti) {
-		return NO;
-	}
-	int back = (_frontIdx + 1) % 2;
-	bool eof = false;
-	if (!vti_copy_next_frame(_vti, _surfaces[back], &eof)) {
-		return NO;
-	}
-	_frontIdx = back;
-	_gen++;
-	return YES;
-}
-
-- (void)presentFrontOnMain {
-	IOSurfaceRef front = _surfaces[_frontIdx];
-	if (!front) {
+	NSURL *url = [NSURL fileURLWithPath:path];
+	AVAsset *asset = [AVAsset assetWithURL:url];
+	if (!asset) {
+		[self setStatus:@"无法读取视频资源"];
 		return;
 	}
-	CFRetain(front);
-	uint64_t gen = _gen;
-	dispatch_async(dispatch_get_main_queue(), ^{
-		[CATransaction begin];
-		[CATransaction setDisableActions:YES];
-		self.videoLayer.frame = self.previewHost.bounds;
-		self.videoLayer.contents = (__bridge id)front;
-		[CATransaction commit];
-		CFRelease(front);
-		if ((gen % 30) == 1) {
-			NSString *base = [self storedVideoPath].lastPathComponent ?: @"video";
-			[self setStatus:[NSString stringWithFormat:
-					 @"Virtual cam RUNNING\nVideo: %@\nFrame: #%llu\n\n"
-					 @"* Preview is virtual inside THIS app only\n"
-					 @"* Other apps need jailbreak tweak",
-					 base, (unsigned long long)gen]];
-		}
-	});
-}
 
-- (void)startVirtualCameraWithPath:(NSString *)path {
-	[self stopVirtualCamera];
-	if (![self openPipelineAtPath:path]) {
-		[self setStatus:[NSString stringWithFormat:@"Cannot open video (unsupported?):\n%@", path]];
-		return;
-	}
-	_virtualRunning = YES;
-	[self setStatus:@"Virtual camera started..."];
+	AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+	self.player = [AVPlayer playerWithPlayerItem:item];
+	self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
 
-	dispatch_sync(self.frameQueue, ^{
-		if ([self advanceFrame]) {
-			[self presentFrontOnMain];
-		}
-	});
+	self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+	self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+	self.playerLayer.frame = self.previewHost.bounds;
+	[self.previewHost.layer addSublayer:self.playerLayer];
 
-	if (self.useRealCameraClock) {
-		[self startRealCameraClock];
-	} else {
-		[self startTimerClock];
-	}
-}
-
-- (void)startTimerClock {
-	[self stopTimer];
-	dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.frameQueue);
-	dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 0), (uint64_t)(NSEC_PER_SEC / 30),
-				  (uint64_t)(NSEC_PER_SEC / 100));
 	__weak typeof(self) weakSelf = self;
-	dispatch_source_set_event_handler(t, ^{
-		__strong typeof(weakSelf) self = weakSelf;
-		if (!self || !self->_virtualRunning) {
-			return;
-		}
-		if ([self advanceFrame]) {
-			[self presentFrontOnMain];
-		}
-	});
-	self.timer = t;
-	dispatch_resume(t);
-}
+	self.loopObserver =
+		[[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+								  object:item
+								   queue:[NSOperationQueue mainQueue]
+							      usingBlock:^(NSNotification *note) {
+								      __strong typeof(weakSelf) self = weakSelf;
+								      [self.player seekToTime:kCMTimeZero];
+								      [self.player play];
+							      }];
 
-- (void)stopTimer {
-	if (self.timer) {
-		dispatch_source_cancel(self.timer);
-		self.timer = nil;
-	}
-}
-
-- (void)stopVirtualCamera {
-	_virtualRunning = NO;
-	[self stopTimer];
-	[self stopRealCameraClock];
-	dispatch_sync(self.frameQueue, ^{
-	});
-	dispatch_async(dispatch_get_main_queue(), ^{
-		self.videoLayer.contents = nil;
-	});
-	[self teardownPipeline];
-}
-
-#pragma mark - Optional real camera clock
-
-- (void)startRealCameraClock {
-	[AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
-		dispatch_async(dispatch_get_main_queue(), ^{
-			if (!granted) {
-				[self setStatus:@"Camera denied; fallback to video-only mode"];
-				self.useRealCameraClock = NO;
-				[self.modeButton setTitle:@"Mode: Video-only (recommended)" forState:UIControlStateNormal];
-				[self startTimerClock];
-				return;
-			}
-			[self setupCaptureIfNeeded];
-			dispatch_async(self.camQueue, ^{
-				if (!self.session.running) {
-					[self.session startRunning];
-				}
-			});
-		});
-	}];
-}
-
-- (void)stopRealCameraClock {
-	dispatch_async(self.camQueue, ^{
-		if (self.session.running) {
-			[self.session stopRunning];
-		}
-	});
-}
-
-- (void)setupCaptureIfNeeded {
-	if (self.session) {
-		return;
-	}
-	self.session = [[AVCaptureSession alloc] init];
-	if ([self.session canSetSessionPreset:AVCaptureSessionPreset1280x720]) {
-		self.session.sessionPreset = AVCaptureSessionPreset1280x720;
-	}
-	AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-	if (!device) {
-		return;
-	}
-	NSError *err = nil;
-	AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:device error:&err];
-	if (!input) {
-		return;
-	}
-	if ([self.session canAddInput:input]) {
-		[self.session addInput:input];
-	}
-	self.dataOutput = [[AVCaptureVideoDataOutput alloc] init];
-	self.dataOutput.alwaysDiscardsLateVideoFrames = YES;
-	self.dataOutput.videoSettings = @{
-		(id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
-	};
-	[self.dataOutput setSampleBufferDelegate:self queue:self.camQueue];
-	if ([self.session canAddOutput:self.dataOutput]) {
-		[self.session addOutput:self.dataOutput];
-	}
-}
-
-- (void)paintSurface:(IOSurfaceRef)src into:(CVPixelBufferRef)dst {
-	if (!src || !dst) {
-		return;
-	}
-	CIImage *image = [[CIImage alloc] initWithIOSurface:src];
-	if (!image) {
-		return;
-	}
-	size_t dw = CVPixelBufferGetWidth(dst);
-	size_t dh = CVPixelBufferGetHeight(dst);
-	size_t sw = IOSurfaceGetWidth(src);
-	size_t sh = IOSurfaceGetHeight(src);
-	if (!dw || !dh || !sw || !sh) {
-		return;
-	}
-	CGFloat scale = MAX((CGFloat)dw / (CGFloat)sw, (CGFloat)dh / (CGFloat)sh);
-	image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
-	CGRect extent = image.extent;
-	CGFloat cropX = extent.origin.x + (extent.size.width - (CGFloat)dw) * 0.5;
-	CGFloat cropY = extent.origin.y + (extent.size.height - (CGFloat)dh) * 0.5;
-	CGRect crop = CGRectMake(cropX, cropY, (CGFloat)dw, (CGFloat)dh);
-	image = [image imageByCroppingToRect:crop];
-	image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(-crop.origin.x, -crop.origin.y)];
-	static CIContext *ctx;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		ctx = [CIContext contextWithOptions:@{ kCIContextWorkingColorSpace : [NSNull null] }];
-	});
-	CVPixelBufferLockBaseAddress(dst, 0);
-	[ctx render:image toCVPixelBuffer:dst bounds:CGRectMake(0, 0, dw, dh) colorSpace:nil];
-	CVPixelBufferUnlockBaseAddress(dst, 0);
-}
-
-- (void)captureOutput:(AVCaptureOutput *)output
-	didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
-	       fromConnection:(AVCaptureConnection *)connection {
-	(void)output;
-	(void)connection;
-	if (!_virtualRunning || !self.useRealCameraClock) {
-		return;
-	}
-	__block IOSurfaceRef front = NULL;
-	dispatch_sync(self.frameQueue, ^{
-		if (![self advanceFrame]) {
-			return;
-		}
-		front = _surfaces[_frontIdx];
-		if (front) {
-			CFRetain(front);
-		}
-	});
-	if (!front) {
-		return;
-	}
-	CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sampleBuffer);
-	if (pb) {
-		[self paintSurface:front into:pb];
-	}
-	dispatch_async(dispatch_get_main_queue(), ^{
-		[CATransaction begin];
-		[CATransaction setDisableActions:YES];
-		self.videoLayer.contents = (__bridge id)front;
-		[CATransaction commit];
-		CFRelease(front);
-	});
+	[self.player play];
+	[self setStatus:[NSString stringWithFormat:
+			 @"正在本App预览区播放:\n%@\n(循环)\n\n"
+			 @"系统「相机」App 不会变——未越狱无法替换。",
+			 path.lastPathComponent]];
 }
 
 @end
