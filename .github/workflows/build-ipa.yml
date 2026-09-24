@@ -7,6 +7,7 @@ on:
     paths-ignore:
       - "**.md"
       - "NO_IPA_ON_WINDOWS.txt"
+      - "PUSH_AND_BUILD.md"
 
 permissions:
   contents: read
@@ -23,22 +24,32 @@ jobs:
 
       - name: Show Xcode
         run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app || true
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
           uname -a
+
+      - name: Inject IOSurface headers into SDK
+        run: |
+          set -euo pipefail
+          chmod +x scripts/inject_iosurface_headers.sh
+          # SDK may be root-owned; use sudo
+          sudo bash scripts/inject_iosurface_headers.sh
+          # verify
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurface.h"
+          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurfaceObjC.h"
+          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurfaceRef.h"
 
       - name: Install Theos
         run: |
           set -euo pipefail
           git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
-          # iOS toolchains: Theos on macOS uses host Xcode
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "PATH=$HOME/theos/bin:$PATH" >> "$GITHUB_ENV"
-          # ldid via brew if missing
           if ! command -v ldid >/dev/null 2>&1; then
             brew install ldid || true
           fi
-          ls "$HOME/theos/makefiles" | head
 
       - name: Build application (Theos)
         working-directory: app
@@ -47,10 +58,8 @@ jobs:
           export THEOS="${THEOS:-$HOME/theos}"
           export TARGET=iphone:clang:latest:14.0
           export ARCHS=arm64
-          # Point THEOS_PROJECT_DIR for vendor headers relative path
-          export THEOS_PROJECT_DIR="$PWD"
           make clean || true
-          make all FINALPACKAGE=1 GO_EASY_ON_ME=1
+          make all FINALPACKAGE=1
           echo "== find app =="
           find .. -type d -name 'VirtualCamDemo.app' 2>/dev/null | head -n 20
           ls -la .theos/obj 2>/dev/null || true
@@ -61,7 +70,6 @@ jobs:
           set -euo pipefail
           export THEOS="${THEOS:-$HOME/theos}"
           chmod +x build_ipa.sh || true
-          # Prefer script; fallback manual pack
           if ./build_ipa.sh; then
             echo "build_ipa.sh ok"
           else
@@ -69,7 +77,7 @@ jobs:
             APP="$(find . -type d -name 'VirtualCamDemo.app' | head -n 1)"
             if [ -z "$APP" ]; then
               echo "VirtualCamDemo.app not found"
-              find . -maxdepth 5 -type d | head -n 80
+              find . -maxdepth 6 -type d | head -n 100
               exit 1
             fi
             mkdir -p dist/_ipa/Payload
@@ -83,7 +91,7 @@ jobs:
             (cd dist/_ipa && zip -qr ../VirtualCamDemo.ipa Payload)
           fi
           ls -lah dist || true
-          find dist -type f -name '*.ipa' -o -name '*.app' | head
+          find dist -type f -name '*.ipa' | head
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
@@ -100,8 +108,10 @@ jobs:
         working-directory: tweak
         run: |
           export THEOS="${THEOS:-$HOME/theos}"
+          export TARGET=iphone:clang:latest:14.0
+          export ARCHS=arm64
           make package FINALPACKAGE=1 || true
-          find . -name '*.deb' -o -name '*.ipa' | head
+          find . -name '*.deb' | head
 
       - name: Upload deb artifact
         if: always()
