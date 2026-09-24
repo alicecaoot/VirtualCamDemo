@@ -1,0 +1,111 @@
+name: Build VirtualCamDemo IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - "NO_IPA_ON_WINDOWS.txt"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          uname -a
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          # iOS toolchains: Theos on macOS uses host Xcode
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "PATH=$HOME/theos/bin:$PATH" >> "$GITHUB_ENV"
+          # ldid via brew if missing
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid || true
+          fi
+          ls "$HOME/theos/makefiles" | head
+
+      - name: Build application (Theos)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          export THEOS="${THEOS:-$HOME/theos}"
+          make clean || true
+          make all FINALPACKAGE=1
+          find . -type d -name 'VirtualCamDemo.app' 2>/dev/null || true
+          find "$THEOS" -name 'VirtualCamDemo.app' 2>/dev/null | head || true
+          find .. -type d -name 'VirtualCamDemo.app' 2>/dev/null | head -n 20
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          export THEOS="${THEOS:-$HOME/theos}"
+          chmod +x build_ipa.sh || true
+          # Prefer script; fallback manual pack
+          if ./build_ipa.sh; then
+            echo "build_ipa.sh ok"
+          else
+            echo "build_ipa.sh failed, manual pack"
+            APP="$(find . -type d -name 'VirtualCamDemo.app' | head -n 1)"
+            if [ -z "$APP" ]; then
+              echo "VirtualCamDemo.app not found"
+              find . -maxdepth 5 -type d | head -n 80
+              exit 1
+            fi
+            mkdir -p dist/_ipa/Payload
+            cp -R "$APP" dist/_ipa/Payload/
+            if [ ! -f dist/_ipa/Payload/VirtualCamDemo.app/Info.plist ]; then
+              cp app/Info.plist dist/_ipa/Payload/VirtualCamDemo.app/
+            fi
+            if command -v ldid >/dev/null 2>&1; then
+              ldid -Sapp/entitlements.plist dist/_ipa/Payload/VirtualCamDemo.app/VirtualCamDemo || ldid -S dist/_ipa/Payload/VirtualCamDemo.app/VirtualCamDemo || true
+            fi
+            (cd dist/_ipa && zip -qr ../VirtualCamDemo.ipa Payload)
+          fi
+          ls -lah dist || true
+          find dist -type f -name '*.ipa' -o -name '*.app' | head
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtualCamDemo-ipa
+          path: |
+            dist/**/*.ipa
+            dist/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build tweak deb (optional)
+        continue-on-error: true
+        working-directory: tweak
+        run: |
+          export THEOS="${THEOS:-$HOME/theos}"
+          make package FINALPACKAGE=1 || true
+          find . -name '*.deb' -o -name '*.ipa' | head
+
+      - name: Upload deb artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyFirstTweak-deb
+          path: |
+            packages/**/*.deb
+            tweak/packages/**/*.deb
+          if-no-files-found: ignore
+          retention-days: 14

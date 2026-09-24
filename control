@@ -1,0 +1,9 @@
+Package: com.yourname.myfirsttweak
+Name: MyFirstTweak
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: Practice tweak: hook a method and log (own app only).
+Maintainer: Your Name <you@example.com>
+Author: Your Name <you@example.com>
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)

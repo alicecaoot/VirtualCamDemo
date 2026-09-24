@@ -1,0 +1,9 @@
+Package: com.yourname.virtualcamdemo
+Name: VirtualCamDemo
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Demo app - camera session with virtual video frames (single-clock pipeline).
+Maintainer: Your Name <you@example.com>
+Author: Your Name <you@example.com>
+Section: Utilities
+Depends: firmware (>= 14.0)

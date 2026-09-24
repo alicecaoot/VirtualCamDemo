@@ -1,0 +1,9 @@
+Package: com.yourname.myfirsttweak
+Name: MyFirstTweak
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Virtual camera preview via video IOSurface (own app).
+Maintainer: Your Name <you@example.com>
+Author: Your Name <you@example.com>
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)

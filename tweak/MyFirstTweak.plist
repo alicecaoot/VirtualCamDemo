@@ -1,0 +1,9 @@
+{
+	Filter = {
+		Bundles = (
+			"com.yourname.virtualcamdemo",
+			"com.yourcompany.YourApp"
+		);
+	};
+}
+

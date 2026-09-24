@@ -1,0 +1,11 @@
+.theos/
+packages/
+dist/
+*.deb
+.DS_Store
+*.ipa
+!docs/**
+.idea/
+xcuserdata/
+*.moved-aside
+opaque-pointers/
