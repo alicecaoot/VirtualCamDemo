@@ -1,7 +1,10 @@
 framework module IOSurface [extern_c] {
-  umbrella header "IOSurface.h"
   header "IOSurfaceRef.h"
-  header "IOSurfaceObjC.h"
   export *
-  module * { export * }
+
+  explicit module ObjC {
+    requires objc
+    header "IOSurfaceObjC.h"
+    export *
+  }
 }

@@ -16,90 +16,100 @@ permissions:
 jobs:
   build-ipa:
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode
+      - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app || true
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
-          uname -a
 
       - name: Inject IOSurface headers into SDK
         run: |
           set -euo pipefail
           chmod +x scripts/inject_iosurface_headers.sh
-          # SDK may be root-owned; use sudo
           sudo bash scripts/inject_iosurface_headers.sh
-          # verify
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurface.h"
+          # Ensure module map is the split one
+          cat "$SDK/System/Library/Frameworks/IOSurface.framework/Modules/module.modulemap"
           test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurfaceObjC.h"
-          test -f "$SDK/System/Library/Frameworks/IOSurface.framework/Headers/IOSurfaceRef.h"
 
-      - name: Install Theos
+      - name: Install Theos + ldid
         run: |
           set -euo pipefail
           git clone --depth=1 --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "PATH=$HOME/theos/bin:$PATH" >> "$GITHUB_ENV"
-          if ! command -v ldid >/dev/null 2>&1; then
-            brew install ldid || true
-          fi
+          brew install ldid || true
 
-      - name: Build application (Theos)
+      - name: Build with Theos (arm64)
         working-directory: app
         run: |
           set -euo pipefail
           export THEOS="${THEOS:-$HOME/theos}"
           export TARGET=iphone:clang:latest:14.0
           export ARCHS=arm64
+          # Disable modules for C file reliability: strip -fmodules from default if any
           make clean || true
-          make all FINALPACKAGE=1
-          echo "== find app =="
-          find .. -type d -name 'VirtualCamDemo.app' 2>/dev/null | head -n 20
-          ls -la .theos/obj 2>/dev/null || true
-          ls -la .theos/obj/arm64 2>/dev/null || true
+          # Compile step by step with explicit flags if make fails
+          if ! make all FINALPACKAGE=1; then
+            echo "Theos make failed — retry compiling iosurface_buffer.c without modules"
+            OBJDIR=".theos/obj/arm64"
+            mkdir -p "$OBJDIR" "$OBJDIR/VirtualCamDemo.app"
+            SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+            CLANG=$(xcrun --sdk iphoneos -f clang)
+            COMMON="-isysroot $SDK -arch arm64 -miphoneos-version-min=14.0 -I.. -fobjc-arc -Wall"
+            $CLANG -x c $COMMON -fno-objc-arc -fno-modules -c ../iosurface_buffer.c -o $OBJDIR/iosurface_buffer.c.o
+            $CLANG $COMMON -c main.m -o $OBJDIR/main.m.o
+            $CLANG $COMMON -c AppDelegate.m -o $OBJDIR/AppDelegate.m.o
+            $CLANG $COMMON -c CameraViewController.m -o $OBJDIR/CameraViewController.m.o
+            $CLANG $COMMON -c ../video_to_iosurface.m -o $OBJDIR/video_to_iosurface.m.o
+            $CLANG $COMMON -framework UIKit -framework Foundation -framework AVFoundation \
+              -framework CoreMedia -framework CoreVideo -framework CoreImage -framework QuartzCore \
+              -framework IOSurface \
+              -o $OBJDIR/VirtualCamDemo.app/VirtualCamDemo \
+              $OBJDIR/main.m.o $OBJDIR/AppDelegate.m.o $OBJDIR/CameraViewController.m.o \
+              $OBJDIR/video_to_iosurface.m.o $OBJDIR/iosurface_buffer.c.o
+            cp Info.plist $OBJDIR/VirtualCamDemo.app/
+            # fake Theos layout
+            mkdir -p .theos/obj
+            rm -rf .theos/obj/VirtualCamDemo.app
+            cp -R $OBJDIR/VirtualCamDemo.app .theos/obj/
+          fi
+          find .. -type d -name 'VirtualCamDemo.app' | head -n 20
+          ls -laR .theos/obj 2>/dev/null | head -n 80
 
-      - name: Package IPA
+      - name: Codesign + package IPA
         run: |
           set -euo pipefail
-          export THEOS="${THEOS:-$HOME/theos}"
-          chmod +x build_ipa.sh || true
-          if ./build_ipa.sh; then
-            echo "build_ipa.sh ok"
-          else
-            echo "build_ipa.sh failed, manual pack"
-            APP="$(find . -type d -name 'VirtualCamDemo.app' | head -n 1)"
-            if [ -z "$APP" ]; then
-              echo "VirtualCamDemo.app not found"
-              find . -maxdepth 6 -type d | head -n 100
-              exit 1
-            fi
-            mkdir -p dist/_ipa/Payload
-            cp -R "$APP" dist/_ipa/Payload/
-            if [ ! -f dist/_ipa/Payload/VirtualCamDemo.app/Info.plist ]; then
-              cp app/Info.plist dist/_ipa/Payload/VirtualCamDemo.app/
-            fi
-            if command -v ldid >/dev/null 2>&1; then
-              ldid -Sapp/entitlements.plist dist/_ipa/Payload/VirtualCamDemo.app/VirtualCamDemo || ldid -S dist/_ipa/Payload/VirtualCamDemo.app/VirtualCamDemo || true
-            fi
-            (cd dist/_ipa && zip -qr ../VirtualCamDemo.ipa Payload)
+          APP="$(find . -type d -name 'VirtualCamDemo.app' | head -n 1)"
+          test -n "$APP"
+          echo "APP=$APP"
+          # Ensure Info.plist
+          if [ ! -f "$APP/Info.plist" ]; then cp app/Info.plist "$APP/"; fi
+          # entitlements sign
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -Sapp/entitlements.plist "$APP/VirtualCamDemo" || ldid -S "$APP/VirtualCamDemo"
           fi
-          ls -lah dist || true
-          find dist -type f -name '*.ipa' | head
+          # file type check
+          file "$APP/VirtualCamDemo" || true
+          mkdir -p dist/Payload
+          rm -rf dist/Payload/*
+          cp -R "$APP" dist/Payload/
+          (cd dist && zip -qr VirtualCamDemo.ipa Payload)
+          ls -lah dist/VirtualCamDemo.ipa
+          # basic zip structure check
+          unzip -l dist/VirtualCamDemo.ipa | head
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: VirtualCamDemo-ipa
-          path: |
-            dist/**/*.ipa
-            dist/*.ipa
+          path: dist/VirtualCamDemo.ipa
           if-no-files-found: error
           retention-days: 14
 
@@ -111,7 +121,6 @@ jobs:
           export TARGET=iphone:clang:latest:14.0
           export ARCHS=arm64
           make package FINALPACKAGE=1 || true
-          find . -name '*.deb' | head
 
       - name: Upload deb artifact
         if: always()
