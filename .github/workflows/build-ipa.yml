@@ -70,7 +70,8 @@ jobs:
             $CLANG $COMMON -c ../video_to_iosurface.m -o $OBJDIR/video_to_iosurface.m.o
             $CLANG $COMMON -framework UIKit -framework Foundation -framework AVFoundation \
               -framework CoreMedia -framework CoreVideo -framework CoreImage -framework QuartzCore \
-              -framework IOSurface \
+              -framework IOSurface -framework PhotosUI -framework UniformTypeIdentifiers \
+              -framework MobileCoreServices \
               -o $OBJDIR/VirtualCamDemo.app/VirtualCamDemo \
               $OBJDIR/main.m.o $OBJDIR/AppDelegate.m.o $OBJDIR/CameraViewController.m.o \
               $OBJDIR/video_to_iosurface.m.o $OBJDIR/iosurface_buffer.c.o
