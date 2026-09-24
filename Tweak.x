@@ -287,8 +287,8 @@ static CIContext *MFTCIContext(void) {
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
 		ctx = [CIContext contextWithOptions:@{
-			(__bridge NSString *)kCIContextWorkingColorSpace : [NSNull null],
-			(__bridge NSString *)kCIContextCacheIntermediates : @NO,
+			kCIContextWorkingColorSpace : [NSNull null],
+			kCIContextCacheIntermediates : @NO,
 		}];
 	});
 	return ctx;

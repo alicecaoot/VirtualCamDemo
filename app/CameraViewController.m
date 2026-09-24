@@ -325,7 +325,7 @@ static NSString *const kVideoFileName = @"demo.mp4";
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
 		ctx = [CIContext contextWithOptions:@{
-			(__bridge NSString *)kCIContextWorkingColorSpace : [NSNull null],
+			kCIContextWorkingColorSpace : [NSNull null],
 		}];
 	});
 	CVPixelBufferLockBaseAddress(dst, 0);
