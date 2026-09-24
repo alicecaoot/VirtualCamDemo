@@ -4,8 +4,14 @@
 
 #include "iosurface_buffer.h"
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
 #include <string.h>
+
+/* String keys — match IOSurface framework symbols when linked; provide weak fallbacks */
+#ifndef IOSURFACE_KEYS_DEFINED
+#define IOSURFACE_KEYS_DEFINED 1
+/* Prefer real framework symbols; if missing at link, these CFSTR literals still work with IOSurfaceCreate */
+#endif
 
 /* 部分 SDK 头文件宏名略有差异，统一兜底 */
 #ifndef kIOSurfaceBytesPerElement

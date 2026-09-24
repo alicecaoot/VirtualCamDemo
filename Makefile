@@ -1,8 +1,7 @@
-# Aggregate: tweak (越狱注入) + app (可打 IPA 的演示 App)
-# 用法见 build_ipa.sh
-
+# Aggregate root — force modern arm64 iOS
 export TARGET := iphone:clang:latest:14.0
 export ARCHS := arm64
+export THEOS_PACKAGE_SCHEME ?=
 
 include $(THEOS)/makefiles/common.mk
 

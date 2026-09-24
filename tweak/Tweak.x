@@ -28,7 +28,7 @@
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>

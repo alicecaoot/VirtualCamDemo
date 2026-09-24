@@ -10,7 +10,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 
 #import "video_to_iosurface.h"
 

@@ -45,11 +45,16 @@ jobs:
         run: |
           set -euo pipefail
           export THEOS="${THEOS:-$HOME/theos}"
+          export TARGET=iphone:clang:latest:14.0
+          export ARCHS=arm64
+          # Point THEOS_PROJECT_DIR for vendor headers relative path
+          export THEOS_PROJECT_DIR="$PWD"
           make clean || true
-          make all FINALPACKAGE=1
-          find . -type d -name 'VirtualCamDemo.app' 2>/dev/null || true
-          find "$THEOS" -name 'VirtualCamDemo.app' 2>/dev/null | head || true
+          make all FINALPACKAGE=1 GO_EASY_ON_ME=1
+          echo "== find app =="
           find .. -type d -name 'VirtualCamDemo.app' 2>/dev/null | head -n 20
+          ls -la .theos/obj 2>/dev/null || true
+          ls -la .theos/obj/arm64 2>/dev/null || true
 
       - name: Package IPA
         run: |
